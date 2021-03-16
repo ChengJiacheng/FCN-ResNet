@@ -19,12 +19,11 @@ from torchvision.transforms import transforms
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms.functional as TF
 
-from utils import RunningConfusionMatrix, VOCSegDataset
+from utils import RunningConfusionMatrix, VOCSegDataset, bilinear_kernel
 import argparse
 import pprint
 
 _utils_pp = pprint.PrettyPrinter()
-
 
 def pprint(x):
     _utils_pp.pprint(x)
@@ -39,7 +38,6 @@ print("Pillow Version: ", PIL.PILLOW_VERSION)
 #  datasets dir
 voc_root = "./VOCdevkit/VOC2012/"
 print(voc_root)
-
 
 classes = ['background', 'aeroplane', 'bicycle', 'bird', 'boat',
            'bottle', 'bus', 'car', 'cat', 'chair', 'cow', 'diningtable',
@@ -66,7 +64,6 @@ label1 = Image.fromarray(label1.astype(np.uint8))
 label1 = np.asarray(Image.open('./VOCdevkit/VOC2012/SegmentationClass/2007_000033.png')).copy()
 label1[label1 == 255] = 0
 
-
 # label1 = np.asarray(label1)
 # label1 = image2label(label1)
 #
@@ -74,19 +71,6 @@ label1[label1 == 255] = 0
 # label2 = cv2.imread('./VOCdevkit/VOC2012/SegmentationClass/2007_000033.png', cv2.COLOR_BGR2RGB)
 # label2 = cv2.imread('./VOCdevkit/VOC2012/SegmentationClass/2007_000033.png')
 # label2 = image2label(label2)
-
-
-def bilinear_kernel(in_channels, out_channels, kernel_size):
-    factor = (kernel_size + 1) // 2
-    if kernel_size % 2 == 1:
-        center = factor - 1
-    else:
-        center = factor - 0.5
-    og = np.ogrid[:kernel_size, :kernel_size]
-    filt = (1 - abs(og[0] - center) / factor) * (1 - abs(og[1] - center) / factor)
-    weight = np.zeros((in_channels, out_channels, kernel_size, kernel_size), dtype='float32')
-    weight[range(in_channels), range(out_channels), :, :] = filt
-    return torch.from_numpy(weight)
 
 
 image = cv2.imread('./VOCdevkit/VOC2012/JPEGImages/2007_005210.jpg', cv2.COLOR_BGR2RGB)
@@ -121,20 +105,6 @@ image = cv2.imread('./VOCdevkit/VOC2012/JPEGImages/2007_005210.jpg', cv2.COLOR_B
 num_classes = len(classes)
 
 
-def bilinear_kernel(in_channels, out_channels, kernel_size):
-    # reference: https://zh.gluon.ai/chapter_computer-vision/fcn.html
-    factor = (kernel_size + 1) // 2
-    if kernel_size % 2 == 1:
-        center = factor - 1
-    else:
-        center = factor - 0.5
-    og = np.ogrid[:kernel_size, :kernel_size]
-    filt = (1 - abs(og[0] - center) / factor) * (1 - abs(og[1] - center) / factor)
-    weight = np.zeros((in_channels, out_channels, kernel_size, kernel_size), dtype='float32')
-    weight[range(in_channels), range(out_channels), :, :] = filt
-    return torch.from_numpy(weight)
-
-
 class ResnetFCN(nn.Module):
     def __init__(self, num_classes, backbone='resnet34'):
         super(ResnetFCN, self).__init__()
@@ -162,27 +132,23 @@ class ResnetFCN(nn.Module):
         del pretrained_net
 
 
-
-        self.upsample_x32 = nn.ConvTranspose2d(num_classes, num_classes, 4, 2, 1, bias=False)
-        self.upsample_x16 = nn.ConvTranspose2d(num_classes, num_classes, 4, 2, 1, bias=False)
-        self.upsample_x8 = nn.ConvTranspose2d(in_channels=num_classes, out_channels=num_classes, kernel_size=16,
-                                              stride=8, padding=4, bias=False)
-        
         if args.bilinear:
             self.upsample_x32 = nn.Upsample(scale_factor=2, mode='bilinear')
             self.upsample_x16 = nn.Upsample(scale_factor=2, mode='bilinear')
             self.upsample_x8 = nn.Upsample(scale_factor=8, mode='bilinear')
         else:
-                
+            self.upsample_x32 = nn.ConvTranspose2d(num_classes, num_classes, 4, 2, 1, bias=False)
+            self.upsample_x16 = nn.ConvTranspose2d(num_classes, num_classes, 4, 2, 1, bias=False)
+            self.upsample_x8 = nn.ConvTranspose2d(in_channels=num_classes, out_channels=num_classes, kernel_size=16,
+                                                  stride=8, padding=4, bias=False)
+
             self.upsample_x8.weight.data = bilinear_kernel(num_classes, num_classes, 16)  # 使用双线性 kernel
             self.upsample_x16.weight.data = bilinear_kernel(num_classes, num_classes, 4)
             self.upsample_x32.weight.data = bilinear_kernel(num_classes, num_classes, 4)
-    
+
             # self.upsample_x8.require_grad = False
             # self.upsample_x16.require_grad = False
             # self.upsample_x32.require_grad = False
-
-
 
     def forward(self, x):
         x = self.stage1(x)
@@ -229,8 +195,6 @@ def img_transforms(image, mask, crop_size):
 
     mask = torch.from_numpy(np.asarray(mask))
 
-    #    print(mask.shape)
-
     return image, mask.squeeze().long()
 
 
@@ -242,13 +206,15 @@ if __name__ == '__main__':
     parser.add_argument('--gpu', default="0")
     parser.add_argument('--model', default='resnet101', choices=['resnet34', 'resnet50', 'resnet101'])
     parser.add_argument('--lr', type=float, default=1e-2)
+    parser.add_argument('--milestones', default = [120])
+    parser.add_argument('--gamma', type=float, default=.1)
 
     args = parser.parse_args()
     import platform
 
     if platform.system() == 'Windows':
         args.gpu = '0'
-        args.num_workers = 0
+        args.num_workers = 1
         args.batch_size = 16
 
     pprint(vars(args))
@@ -270,7 +236,7 @@ if __name__ == '__main__':
     # output = loss(m(conv(data)), target)
     # output.backward()
 
-    input_shape = (256, 256)
+    input_shape = (224, 320)
 
     voc_train = VOCSegDataset(True, input_shape, img_transforms)
     voc_test = VOCSegDataset(False, input_shape, img_transforms)
@@ -289,6 +255,7 @@ if __name__ == '__main__':
     # model = model.cuda()
 
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=0e-4)
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=args.milestones, gamma=args.gamma)
     # IOUMetric = IOUMetric(num_classes)
 
     # 1/0
@@ -339,16 +306,11 @@ if __name__ == '__main__':
                 #     print(step, mIOU.compute_current_mean_intersection_over_union())
 
             if phase == 'train':
-                # train_acc, train_acc_cls, _, train_mean_iu, train_fwavacc =  IOUMetric.evaluate()
-                # print(train_acc, train_acc_cls, train_mean_iu)
-                print(epoch, phase, mIOU.compute_current_mean_intersection_over_union())
-            #                1/0
-            elif phase == 'val':
-                # t = IOUMetric.hist
-                # val_acc, val_acc_cls, _, val_mean_iu, val_fwavacc =  IOUMetric.evaluate()
-                # print(val_acc, val_acc_cls, val_mean_iu)
-                print(epoch, phase, mIOU.compute_current_mean_intersection_over_union())
-        #                1/0
+                scheduler.step()
+
+            print(epoch, phase, mIOU.compute_current_mean_intersection_over_union())
+
+
 
         time_elapsed = time.time() - start_time
 
